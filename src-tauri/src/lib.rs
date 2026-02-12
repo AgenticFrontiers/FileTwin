@@ -59,6 +59,11 @@ async fn pick_and_send_file(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn capture_screenshot_and_send(app: tauri::AppHandle) -> Result<(), String> {
+    sync::capture_screenshot_and_send(app).await
+}
+
+#[tauri::command]
 async fn save_received_file(name: String, data: String, app: tauri::AppHandle) -> Result<String, String> {
     sync::save_received_file(name, data, app).await
 }
@@ -81,6 +86,7 @@ pub fn run() {
             send_clipboard,
             send_bring_to_front,
             pick_and_send_file,
+            capture_screenshot_and_send,
             save_received_file,
         ])
         .run(tauri::generate_context!())

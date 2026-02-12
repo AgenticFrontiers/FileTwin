@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { writeText, readText } from "@tauri-apps/plugin-clipboard-manager";
@@ -21,8 +21,14 @@ function App() {
   const [clipboardContent, setClipboardContent] = useState("");
   const [syncClipboard, setSyncClipboard] = useState(true);
   const [transferring, setTransferring] = useState(false);
+  const [screenshotting, setScreenshotting] = useState(false);
   const [receivedFiles, setReceivedFiles] = useState<{ name: string; data: string }[]>([]);
   const [hostName, setHostName] = useState("");
+  const [connecting, setConnecting] = useState(false);
+  const [connectingToPeer, setConnectingToPeer] = useState<string | null>(null);
+  const [showConnectionSuccess, setShowConnectionSuccess] = useState(false);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const connectionSuccessTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     invoke<string>("get_host_name").then(setHostName).catch(() => setHostName("This Mac"));
@@ -31,12 +37,22 @@ function App() {
   useEffect(() => {
     const unlistenPeers = listen<Peer[]>("peers", (e) => setPeers(e.payload));
     const unlistenConnected = listen<{ name: string }>("connected", (e) => {
+      if (connectionSuccessTimeoutRef.current) clearTimeout(connectionSuccessTimeoutRef.current);
       setConnectedPeer(e.payload.name);
       setConnectionStatus("connected");
+      setConnecting(false);
+      setConnectingToPeer(null);
+      setShowConnectionSuccess(true);
+      connectionSuccessTimeoutRef.current = setTimeout(() => {
+        setShowConnectionSuccess(false);
+        connectionSuccessTimeoutRef.current = null;
+      }, 4000);
     });
     const unlistenDisconnected = listen("disconnected", () => {
       setConnectedPeer(null);
       setConnectionStatus("idle");
+      setConnecting(false);
+      setConnectingToPeer(null);
     });
     const unlistenClipboard = listen<{ text: string }>("remote_clipboard", (e) => {
       if (syncClipboard && e.payload.text) {
@@ -92,6 +108,7 @@ function App() {
       await invoke("stop_browse");
       setConnectionStatus("idle");
       setPeers([]);
+      setConnectionError(null);
     } catch (e) {
       console.error(e);
     }
@@ -99,9 +116,15 @@ function App() {
 
   const connectTo = async (peer: Peer) => {
     try {
+      setConnectionError(null);
+      setConnecting(true);
+      setConnectingToPeer(peer.name);
       await invoke("connect_to", { host: peer.host, port: peer.port });
     } catch (e) {
       console.error(e);
+      setConnectionError(e instanceof Error ? e.message : String(e));
+      setConnecting(false);
+      setConnectingToPeer(null);
     }
   };
 
@@ -144,6 +167,17 @@ function App() {
       console.error(e);
     } finally {
       setTransferring(false);
+    }
+  };
+
+  const captureScreenshotAndSend = async () => {
+    try {
+      setScreenshotting(true);
+      await invoke("capture_screenshot_and_send");
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setScreenshotting(false);
     }
   };
 
@@ -192,12 +226,29 @@ function App() {
           </div>
         )}
         {connectionStatus === "browsing" && (
-          <div className="status">
-            <span className="badge">Looking for devices…</span>
-            <button type="button" className="btn ghost" onClick={stopBrowsing}>
-              Stop
-            </button>
-            {peers.length > 0 && (
+          <div className="status connection-browsing-wrap">
+            <div className="status">
+              {connecting ? (
+                <>
+                  <span className="spinner" aria-hidden />
+                  <span className="badge">Connecting to {connectingToPeer}…</span>
+                </>
+              ) : (
+                <>
+                  <span className="badge">Looking for devices…</span>
+                  <button type="button" className="btn ghost" onClick={stopBrowsing}>
+                    Stop
+                  </button>
+                </>
+              )}
+            </div>
+            {connecting && (
+              <p className="connection-hint">Up to 3 attempts (15 sec each). Ensure both Macs are on the same network.</p>
+            )}
+            {connectionError && (
+              <p className="connection-error">{connectionError}</p>
+            )}
+            {peers.length > 0 && !connecting && (
               <ul className="peer-list">
                 {peers.map((p) => (
                   <li key={`${p.host}:${p.port}`}>
@@ -212,14 +263,19 @@ function App() {
           </div>
         )}
         {connectionStatus === "connected" && (
-          <div className="status">
-            <span className="badge success">Connected to {connectedPeer}</span>
-            <button type="button" className="btn ghost" onClick={disconnect}>
-              Disconnect
-            </button>
-            <button type="button" className="btn small" onClick={requestOtherFocus} title="Bring app to front on other device">
-              Open on other device
-            </button>
+          <div className="status connection-success-wrap">
+            <div className="status">
+              <span className="badge success">Connected to {connectedPeer}</span>
+              <button type="button" className="btn ghost" onClick={disconnect}>
+                Disconnect
+              </button>
+              <button type="button" className="btn small" onClick={requestOtherFocus} title="Bring app to front on other device">
+                Open on other device
+              </button>
+            </div>
+            {showConnectionSuccess && (
+              <p className="connection-success-msg">Connection successful!</p>
+            )}
           </div>
         )}
       </section>
@@ -254,14 +310,25 @@ function App() {
 
           <section className="card files">
             <h2>Transfer files</h2>
-            <button
-              type="button"
-              className="btn primary"
-              onClick={pickAndSendFile}
-              disabled={transferring}
-            >
-              {transferring ? "Sending…" : "Send a file"}
-            </button>
+            <div className="row">
+              <button
+                type="button"
+                className="btn primary"
+                onClick={pickAndSendFile}
+                disabled={transferring}
+              >
+                {transferring ? "Sending…" : "Send a file"}
+              </button>
+              <button
+                type="button"
+                className="btn primary"
+                onClick={captureScreenshotAndSend}
+                disabled={screenshotting || transferring}
+                title="Capture screen (select region), save as JPG, and send to remote"
+              >
+                {screenshotting ? "Capturing…" : "Capture screenshot"}
+              </button>
+            </div>
             {receivedFiles.length > 0 && (
               <div className="received-files">
                 <h3>Received</h3>

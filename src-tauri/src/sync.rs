@@ -1,11 +1,14 @@
 use base64::Engine;
+use chrono::Local;
 use futures_util::{SinkExt, StreamExt};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::net::TcpListener;
@@ -14,6 +17,8 @@ use tokio_tungstenite::{accept_async, connect_async, tungstenite::Message};
 
 const SERVICE_TYPE: &str = "_remotesync._tcp.local.";
 const WS_PORT: u16 = 18765;
+const CONNECT_TIMEOUT_SECS: u64 = 15;
+const CONNECT_MAX_ATTEMPTS: u32 = 3;
 
 static HOSTING: AtomicBool = AtomicBool::new(false);
 static BROWSING: AtomicBool = AtomicBool::new(false);
@@ -258,8 +263,40 @@ pub async fn stop_browse(app: AppHandle) -> Result<(), String> {
 
 pub async fn connect_to(host: String, port: u16, app: AppHandle) -> Result<(), String> {
     let url = format!("ws://{}:{}", host, port);
-    let (ws_stream, _) = connect_async(url).await.map_err(|e| e.to_string())?;
-    let (mut write, mut read) = ws_stream.split();
+    let timeout_msg = "Connection timed out. Check that both Macs are on the same network and the other device is sharing.";
+
+    let (mut write, mut read) = {
+        let mut last_error = String::new();
+        let mut ws_stream = None;
+
+        for attempt in 1..=CONNECT_MAX_ATTEMPTS {
+            let connect_fut = connect_async(&url);
+            match tokio::time::timeout(
+                Duration::from_secs(CONNECT_TIMEOUT_SECS),
+                connect_fut,
+            )
+            .await
+            {
+                Ok(Ok(stream)) => {
+                    ws_stream = Some(stream);
+                    break;
+                }
+                Ok(Err(e)) => last_error = e.to_string(),
+                Err(_) => last_error = timeout_msg.to_string(),
+            }
+            if attempt < CONNECT_MAX_ATTEMPTS {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+
+        let (stream, _) = ws_stream.ok_or_else(|| {
+            format!(
+                "Failed after {} attempts. {}",
+                CONNECT_MAX_ATTEMPTS, last_error
+            )
+        })?;
+        stream.split()
+    };
 
     let my_name = hostname::get()
         .map(|h| h.to_string_lossy().into_owned())
@@ -389,6 +426,63 @@ pub async fn pick_and_send_file(app: AppHandle) -> Result<(), String> {
         }
     }
     Err("Not connected".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn capture_screenshot_to_jpg() -> Result<(PathBuf, String), String> {
+    let name = format!("screenshot_{}.jpg", Local::now().format("%Y-%m-%d_%H-%M-%S"));
+    let temp_dir = std::env::temp_dir();
+    let path = temp_dir.join(&name);
+
+    let status = Command::new("screencapture")
+        .args(["-i", "-x", "-t", "jpg", path.to_str().unwrap()])
+        .status()
+        .map_err(|e| e.to_string())?;
+
+    if !status.success() {
+        return Err("Screenshot cancelled or failed".to_string());
+    }
+
+    Ok((path, name))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn capture_screenshot_to_jpg() -> Result<(PathBuf, String), String> {
+    Err("Screenshot capture is only supported on macOS".to_string())
+}
+
+fn send_file_bytes(app: &AppHandle, name: String, bytes: &[u8]) -> Result<(), String> {
+    let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let msg = WsMessage::File { name, data };
+    if let Some(state) = app.try_state::<SyncState>() {
+        if let Some(tx) = state.host_tx.lock().ok().and_then(|g| g.clone()) {
+            let json = serde_json::to_string(&msg).map_err(|e| e.to_string())?;
+            tauri::async_runtime::block_on(async move {
+                tx.send(json).await.map_err(|_| "Send failed".to_string())
+            })?;
+            return Ok(());
+        }
+        if let Some(tx) = state.client_tx.lock().ok().and_then(|g| g.clone()) {
+            let json = serde_json::to_string(&msg).map_err(|e| e.to_string())?;
+            tauri::async_runtime::block_on(async move {
+                tx.send(json).await.map_err(|_| "Send failed".to_string())
+            })?;
+            return Ok(());
+        }
+    }
+    Err("Not connected".to_string())
+}
+
+pub async fn capture_screenshot_and_send(app: AppHandle) -> Result<(), String> {
+    let result = tokio::task::spawn_blocking(capture_screenshot_to_jpg)
+        .await
+        .map_err(|e| e.to_string())?;
+    let (path, name) = result?;
+
+    let bytes = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&path);
+
+    send_file_bytes(&app, name, &bytes)
 }
 
 pub async fn save_received_file(name: String, data: String, app: AppHandle) -> Result<String, String> {
