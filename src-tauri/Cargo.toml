@@ -1,0 +1,28 @@
+[package]
+name = "remote-sync"
+version = "0.1.0"
+description = "Sync clipboard and files between Macs over WiFi - no IP needed"
+edition = "2021"
+
+[lib]
+name = "tauri_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+futures-util = "0.3"
+mdns-sd = "0.17"
+base64 = "0.22"
+hostname = "0.4"
+local-ip-address = "0.6"
+
