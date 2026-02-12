@@ -352,7 +352,3 @@ After building on a Mac, you can copy the app to another Mac without building th
 ## License
 
 MIT
-<<<<<<< HEAD
-=======
->>>>>>> ef07763 (for commiting the changes for file sharing)
->>>>>>> 1320ae5 (for commiting the changes for file sharing)
