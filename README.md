@@ -1,13 +1,10 @@
 
 # FileTwin
 FileTwin is a peer-to-peer file synchronization system designed for macOS. It enables seamless, secure, and near real-time syncing between two Macs — whether over a local network or remotely — without relying on third-party cloud storage.  Built for speed, privacy, and simplicity.
-=======
->>>>>>> 1320ae5 (for commiting the changes for file sharing)
+
 # RemoteSync
 
 A **Tauri** app that syncs clipboard and files between two computers over the same WiFi — **no IP address needed**. Devices find each other by name using mDNS (Bonjour). Works on **macOS**; can be adapted for Windows and Linux.
-
----
 
 ## Table of contents
 
